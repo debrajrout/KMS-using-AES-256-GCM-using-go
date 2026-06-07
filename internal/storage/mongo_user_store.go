@@ -22,14 +22,15 @@ type MongoUserStore struct {
 }
 
 // NewMongoUserStore initializes a new MongoUserStore.
-func NewMongoUserStore(uri, dbName, collectionName string) (*MongoUserStore, error) {
+func NewMongoUserStore(ctx context.Context, uri, dbName, collectionName string) (*MongoUserStore, error) {
 	clientOpts := options.Client().ApplyURI(uri)
-	client, err := mongo.Connect(context.Background(), clientOpts)
+	client, err := mongo.Connect(ctx, clientOpts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to MongoDB: %w", err)
 	}
 
-	if err := client.Ping(context.Background(), nil); err != nil {
+	if err := client.Ping(ctx, nil); err != nil {
+		_ = client.Disconnect(ctx)
 		return nil, fmt.Errorf("failed to ping MongoDB: %w", err)
 	}
 

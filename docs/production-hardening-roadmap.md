@@ -19,6 +19,8 @@ operator action.
 
 ## Step 2: HTTP and Request Hardening
 
+Status: implemented in the working tree.
+
 - Enforce allowed HTTP methods.
 - Add request-body size limits and strict JSON decoding.
 - Configure server read, write, header, and idle timeouts.

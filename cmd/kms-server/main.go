@@ -2,11 +2,12 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
-	"time"
+	"syscall"
 
 	firebase "firebase.google.com/go"
 	"google.golang.org/api/option"
@@ -45,48 +46,68 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to initialize MasterKeyStore: %v", err)
 	}
-	defer masterKeyStore.Close(context.Background())
 
 	// 4. Initialize MongoDB user store
-	userStore, err := storage.NewMongoUserStore(cfg.MongoURI, cfg.MongoDBName, cfg.MongoUsersCollection)
+	userStoreCtx, cancelUserStore := context.WithTimeout(context.Background(), cfg.RequestTimeout)
+	userStore, err := storage.NewMongoUserStore(userStoreCtx, cfg.MongoURI, cfg.MongoDBName, cfg.MongoUsersCollection)
+	cancelUserStore()
 	if err != nil {
 		log.Fatalf("Failed to create MongoUserStore: %v", err)
 	}
-	defer userStore.Close(context.Background())
 
 	// 5. Initialize MongoDB DEK store
-	dekStore, err := storage.NewMongoDEKStore(cfg.MongoURI, cfg.MongoDBName, cfg.MongoDEKCollection)
+	dekStoreCtx, cancelDEKStore := context.WithTimeout(context.Background(), cfg.RequestTimeout)
+	dekStore, err := storage.NewMongoDEKStore(dekStoreCtx, cfg.MongoURI, cfg.MongoDBName, cfg.MongoDEKCollection)
+	cancelDEKStore()
 	if err != nil {
 		log.Fatalf("Failed to create MongoDEKStore: %v", err)
 	}
-	defer dekStore.Close(context.Background())
 
 	// 6. Initialize Firebase
 	opt := option.WithCredentialsFile(cfg.FirebaseServiceAccountPath)
-	app, err := firebase.NewApp(context.Background(), nil, opt)
+	firebaseCtx, cancelFirebase := context.WithTimeout(context.Background(), cfg.RequestTimeout)
+	app, err := firebase.NewApp(firebaseCtx, nil, opt)
 	if err != nil {
+		cancelFirebase()
 		log.Fatalf("Failed to initialize Firebase App: %v", err)
 	}
-	firebaseAuth, err := app.Auth(context.Background())
+	firebaseAuth, err := app.Auth(firebaseCtx)
+	cancelFirebase()
 	if err != nil {
 		log.Fatalf("Failed to get Firebase Auth client: %v", err)
 	}
 
 	// 7. Create the KMS server
-	kmsServer := server.NewServer(masterKeyStore, userStore, dekStore, firebaseAuth)
+	kmsServer := server.NewServer(
+		masterKeyStore,
+		userStore,
+		dekStore,
+		firebaseAuth,
+		cfg.RequestTimeout,
+		cfg.MaxRequestBodyBytes,
+		cfg.RateLimitRequestsPerSecond,
+		cfg.RateLimitBurst,
+	)
 
 	// 8. Setup routes
 	router := kmsServer.Routes()
 
 	// 9. Start HTTPS server with graceful shutdown
-	addr := ":8443"
 	httpServer := &http.Server{
-		Addr:    addr,
-		Handler: router,
+		Addr:              cfg.HTTPAddr,
+		Handler:           router,
+		ReadHeaderTimeout: cfg.HTTPReadHeaderTimeout,
+		ReadTimeout:       cfg.HTTPReadTimeout,
+		WriteTimeout:      cfg.HTTPWriteTimeout,
+		IdleTimeout:       cfg.HTTPIdleTimeout,
+		MaxHeaderBytes:    cfg.HTTPMaxHeaderBytes,
+		TLSConfig: &tls.Config{
+			MinVersion: tls.VersionTLS13,
+		},
 	}
 
 	go func() {
-		log.Printf("KMS server listening on %s", addr)
+		log.Printf("KMS server listening on %s", cfg.HTTPAddr)
 		if err := httpServer.ListenAndServeTLS(cfg.TLSCertPath, cfg.TLSKeyPath); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("Server error: %v", err)
 		}
@@ -94,17 +115,29 @@ func main() {
 
 	// Handle graceful shutdown
 	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, os.Interrupt)
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 	<-stop
 
 	log.Println("Shutting down server...")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.HTTPShutdownTimeout)
 	defer cancel()
 
 	if err := httpServer.Shutdown(ctx); err != nil {
-		log.Fatalf("Server forced to shutdown: %v", err)
+		log.Printf("Server forced to shutdown: %v", err)
 	}
+
+	closeUserStoreCtx, cancelCloseUserStore := context.WithTimeout(context.Background(), cfg.HTTPShutdownTimeout)
+	if err := userStore.Close(closeUserStoreCtx); err != nil {
+		log.Printf("Failed to close MongoUserStore: %v", err)
+	}
+	cancelCloseUserStore()
+
+	closeDEKStoreCtx, cancelCloseDEKStore := context.WithTimeout(context.Background(), cfg.HTTPShutdownTimeout)
+	if err := dekStore.Close(closeDEKStoreCtx); err != nil {
+		log.Printf("Failed to close MongoDEKStore: %v", err)
+	}
+	cancelCloseDEKStore()
 
 	log.Println("Server gracefully stopped.")
 }
