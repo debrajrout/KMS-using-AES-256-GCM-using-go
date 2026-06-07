@@ -1,5 +1,22 @@
-# Ignore Firebase service account key
-secrets/firebase-service-account.json
+# Local environment files. Keep only the placeholder template in Git.
 .env
+.env.*
+!.env.example
 
-/certs
+# Credentials and private key material.
+secrets/
+certs/
+*.key
+*.pem
+*.p12
+*.pfx
+*.jks
+*.keystore
+*-service-account.json
+
+# Local build and test output.
+/bin/
+/dist/
+/coverage/
+*.out
+*.test
